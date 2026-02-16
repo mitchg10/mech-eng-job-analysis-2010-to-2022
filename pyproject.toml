@@ -1,0 +1,33 @@
+[project]
+name = "mech-eng-job-analysis-2010-to-2022"
+version = "0.1.0"
+description = "Analysis of mechanical engineering job market trends from 2010 to 2022 using Burning Glass Technologies data."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.4.4",
+    "ipykernel>=7.1.0",
+    "ipywidgets>=8.1.8",
+    "lxml>=6.0.2",
+    "matplotlib>=3.10.8",
+    "mojo>=0.26.1.0",
+    "numpy>=2.4.2",
+    "optuna>=4.7.0",
+    "pandas>=3.0.0",
+    "paramiko>=4.0.0",
+    "pip>=26.0.1",
+    "plotly>=6.5.2",
+    "polars>=1.38.0",
+    "pyarrow>=23.0.0",
+    "pytest>=9.0.2",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+    "scikit-learn>=1.8.0",
+    "seaborn>=0.13.2",
+    "sentence-transformers>=5.2.2",
+    "statsmodels>=0.14.6",
+    "torch>=2.10.0",
+    "tornado>=6.5.4",
+    "tqdm>=4.67.3",
+    "transformers>=5.0.0",
+]

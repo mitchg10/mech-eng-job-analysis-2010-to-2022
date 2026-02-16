@@ -1,0 +1,32 @@
+{
+  "confidence_weights": {
+    "degree_requirement": 15.48,
+    "core_title": 8.55,
+    "design_context": 2.35,
+    "manufacturing_context": 2.80,
+    "specialized_context": 4.55,
+    "hierarchy_context": 5.88,
+    "project_base": 2.30,
+    "industry_mention_multiplier": 1.97,
+    "industry_mention_max": 4.34,
+    "software_mention_multiplier": 1.73,
+    "software_mention_max": 2.80,
+    "software_standalone_multiplier": 1.10,
+    "software_standalone_max": 5.86,
+    "industry_standalone_multiplier": 1.43,
+    "industry_standalone_max": 4.35,
+    "mechanical_concept_multiplier": 1.75,
+    "mechanical_concept_max": 4.11,
+    "exclusion_penalty": -4.77,
+    "non_engineering_penalty": -1.42
+  },
+  "adaptive_thresholds": {
+    "definitive_positive": 7.26,
+    "project_engineer": 3.24,
+    "generic_engineer": 2.36,
+    "design_role": 2.87,
+    "manufacturing_role": 3.05,
+    "standard": 3.9
+  },
+  "chunk_size": 50000
+}

@@ -1,0 +1,30 @@
+{
+  "phase_1": {
+    "study_period": {
+      "start": "2010-01-01",
+      "end": "2022-12-31"
+    },
+    "data_source": "burning_glass",
+    "base_path": "/Volumes/My Book/BurningGlassData",
+    "output_file": "study_data_ME_ONLY.parquet",
+    "output_directory": "Analysis"
+  },
+  "phase_2": {
+    "input_file": "study_data_ME_ONLY.parquet",
+    "output_file": "classified_ME_ONLY.parquet",
+    "chunk_size": 50000
+  },
+  "phase_3": {
+    "input_file": "classified_ME_ONLY.parquet",
+    "skills_output_file": "skills_ME_ONLY.parquet",
+    "trajectory_summary_file": "skill_trajectory_summary.csv",
+    "diagnostics_file": "regression_diagnostics.csv",
+    "min_prevalence": 0.02,
+    "alpha": 0.10,
+    "c_hat_threshold": 1.0,
+    "delta_i_threshold": 2.0,
+    "weight_threshold": 0.7,
+    "plot_output_dir": "plots",
+    "ieee_tables_dir": "ieee_tables"
+  }
+}
