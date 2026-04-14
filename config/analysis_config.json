@@ -7,7 +7,7 @@
     "data_source": "burning_glass",
     "base_path": "/Volumes/My Book/BurningGlassData",
     "output_file": "study_data_ME_ONLY.parquet",
-    "output_directory": "Analysis"
+    "output_directory": "ASME_2026_PAPER"
   },
   "phase_2": {
     "input_file": "study_data_ME_ONLY.parquet",

@@ -55,6 +55,7 @@ class ModelResult:
     loglik: float
     n_obs: int
     residuals: np.ndarray
+    original_y: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -106,7 +107,14 @@ class ModelSelection:
     aicc : float
         AICc value of best model
     delta_i : float
-        Delta_i (difference from best AICc)
+        Delta_i of selected model from the global minimum (0 when best model
+        is selected without parsimony; may be > 0 when parsimony promotes a
+        simpler model over the raw AICc minimum)
+    delta_i_second_best : float
+        Gap between the best model's AICc and the second-best model's AICc
+        (i.e. the smallest nonzero delta across all candidates). This is the
+        Δᵢ used for confidence-tier assignment per B&A (2002). Zero when only
+        one model was fitted.
     weight : float
         Akaike weight
     r_squared : float
@@ -117,15 +125,24 @@ class ModelSelection:
         Models within delta_i <= 2
     model_coefficients : dict
         Coefficients of the best model
+    c_hat : float
+        Overdispersion parameter estimated from the globally best model.
+        1.0 when no overdispersion is detected (AICc used); >1.0 triggers
+        QAICc per B&A (2002).
+    using_qaic : bool
+        True when c_hat > 1.0 and QAICc was used for model selection.
     """
     best_model: str
     aicc: float
     delta_i: float
+    delta_i_second_best: float
     weight: float
     r_squared: float
     adj_r_squared: float
     competitive_models: List[str]
     model_coefficients: Dict[str, float]
+    c_hat: float = 1.0
+    using_qaic: bool = False
 
 
 def fit_candidate_models(
@@ -137,7 +154,7 @@ def fit_candidate_models(
     Fit all candidate models for a single skill.
 
     Fits five models to skill prevalence data:
-    1. Null: prevalence ~ 1
+    1. Null: prevalence ~ job_text_length_std
     2. Linear: prevalence ~ year + job_text_length_std
     3. Log-year: prevalence ~ log(year - min_year + 1) + job_text_length_std
     4. Exponential: log(prevalence) ~ year + job_text_length_std
@@ -171,9 +188,9 @@ def fit_candidate_models(
     # Convert to pandas for statsmodels
     df = skill_data.to_pandas()
 
-    # Standardize year for numerical stability
-    df['year_std'] = (df['Year'] - df['Year'].mean()) / df['Year'].std()
-    df['year_std_sq'] = df['year_std'] ** 2
+    # Center year on global mean (B&A 2002: center only, do not scale)
+    df['year_centered'] = df['Year'] - df['Year'].mean()
+    df['year_centered_sq'] = df['year_centered'] ** 2
 
     # Log-year transformation
     min_year = df['Year'].min()
@@ -181,14 +198,14 @@ def fit_candidate_models(
 
     models = {}
 
-    # Model 1: Null (intercept only)
+    # Model 1: Null (covariate only, no temporal trend)
     try:
-        null_model = smf.ols('prevalence ~ 1', data=df).fit()
+        null_model = smf.ols('prevalence ~ job_text_length_std', data=df).fit()
         models['null'] = ModelResult(
             model_name='null',
             fitted_model=null_model,
-            formula='prevalence ~ 1',
-            n_params=1,
+            formula='prevalence ~ job_text_length_std',
+            n_params=2,
             loglik=null_model.llf,
             n_obs=null_model.nobs,
             residuals=null_model.resid.values
@@ -198,11 +215,11 @@ def fit_candidate_models(
 
     # Model 2: Linear
     try:
-        linear_model = smf.ols('prevalence ~ year_std + job_text_length_std', data=df).fit()
+        linear_model = smf.ols('prevalence ~ year_centered + job_text_length_std', data=df).fit()
         models['linear'] = ModelResult(
             model_name='linear',
             fitted_model=linear_model,
-            formula='prevalence ~ year_std + job_text_length_std',
+            formula='prevalence ~ year_centered + job_text_length_std',
             n_params=3,
             loglik=linear_model.llf,
             n_obs=linear_model.nobs,
@@ -230,26 +247,27 @@ def fit_candidate_models(
     try:
         # Add small constant to avoid log(0)
         df['log_prevalence'] = np.log(df['prevalence'] + 1e-10)
-        exp_model = smf.ols('log_prevalence ~ year_std + job_text_length_std', data=df).fit()
+        exp_model = smf.ols('log_prevalence ~ year_centered + job_text_length_std', data=df).fit()
         models['exponential'] = ModelResult(
             model_name='exponential',
             fitted_model=exp_model,
-            formula='log(prevalence) ~ year_std + job_text_length_std',
+            formula='log(prevalence) ~ year_centered + job_text_length_std',
             n_params=3,
             loglik=exp_model.llf,
             n_obs=exp_model.nobs,
-            residuals=exp_model.resid.values
+            residuals=exp_model.resid.values,
+            original_y=df['prevalence'].values
         )
     except Exception as e:
         print(f"  Warning: Exponential model failed for {skill}: {e}")
 
     # Model 5: Quadratic
     try:
-        quad_model = smf.ols('prevalence ~ year_std + year_std_sq + job_text_length_std', data=df).fit()
+        quad_model = smf.ols('prevalence ~ year_centered + year_centered_sq + job_text_length_std', data=df).fit()
         models['quadratic'] = ModelResult(
             model_name='quadratic',
             fitted_model=quad_model,
-            formula='prevalence ~ year_std + year_std_sq + job_text_length_std',
+            formula='prevalence ~ year_centered + year_centered_sq + job_text_length_std',
             n_params=4,
             loglik=quad_model.llf,
             n_obs=quad_model.nobs,
@@ -282,8 +300,13 @@ def calculate_aicc(model_result: ModelResult, c_hat: float = 1.0) -> float:
 
     Notes
     -----
-    AICc = -2 * log-likelihood + 2K + (2K(K+1))/(n-K-1)
-    QAICc = AICc / c_hat for overdispersed data
+    Standard AICc = -2*log-likelihood + 2K + (2K(K+1))/(n-K-1)
+
+    QAICc per Burnham & Anderson (2002):
+      QAIC  = (-2 * log-likelihood / ĉ) + 2*(K+1)
+      QAICc = QAIC + (2*(K+1)*((K+1)+1)) / (n - (K+1) - 1)
+    K is incremented by 1 to account for estimation of ĉ. The overdispersion
+    correction applies only to the log-likelihood term, not to the penalty.
 
     For exponential models, add Jacobian correction to log-likelihood.
     """
@@ -291,22 +314,25 @@ def calculate_aicc(model_result: ModelResult, c_hat: float = 1.0) -> float:
     k = model_result.n_params
     ll = model_result.loglik
 
-    # Jacobian correction for log-transformed response
-    if model_result.model_name == 'exponential':
-        # Add sum(log(y)) to log-likelihood
-        # This is already handled in statsmodels for log link functions
-        pass
+    # Jacobian correction for log-transformed response (B&A 2002).
+    # The exponential model is fit on log(y), so its log-likelihood lives in
+    # the transformed space. To make it comparable to models fit on y, apply
+    # the change-of-variables correction: ll_y = ll_z - sum(log(y_i)).
+    if model_result.model_name == 'exponential' and model_result.original_y is not None:
+        ll = ll - np.sum(np.log(model_result.original_y))
 
-    # AICc formula
-    aic = -2 * ll + 2 * k
-    correction = (2 * k * (k + 1)) / (n - k - 1) if n - k - 1 > 0 else 0
-    aicc = aic + correction
-
-    # Apply overdispersion correction if needed
     if c_hat > 1.0:
-        aicc = aicc / c_hat
-
-    return aicc
+        # QAICc: overdispersion correction applied only to log-likelihood;
+        # K incremented by 1 for estimation of ĉ (B&A 2002)
+        k_q = k + 1
+        qaic = (-2 * ll / c_hat) + 2 * k_q
+        correction = (2 * k_q * (k_q + 1)) / (n - k_q - 1) if n - k_q - 1 > 0 else 0
+        return qaic + correction
+    else:
+        # Standard AICc
+        aic = -2 * ll + 2 * k
+        correction = (2 * k * (k + 1)) / (n - k - 1) if n - k - 1 > 0 else 0
+        return aic + correction
 
 
 def calculate_overdispersion(model_result: ModelResult) -> float:
@@ -342,25 +368,25 @@ def calculate_overdispersion(model_result: ModelResult) -> float:
 
 def select_best_model(
     models: Dict[str, ModelResult],
-    c_hat_threshold: float = 1.0,
     parsimony: bool = True,
     delta_i_threshold: float = 2.0
 ) -> ModelSelection:
     """
-    Select best model using AICc and parsimony principle.
+    Select best model using AICc/QAICc and parsimony principle.
 
-    Uses information-theoretic approach:
-    1. Calculate AICc for all models
-    2. Calculate delta_i (difference from best AICc)
-    3. Calculate Akaike weights
-    4. Apply parsimony: if delta_i <= 2, prefer simpler model
+    Uses information-theoretic approach per Burnham & Anderson (2002):
+    1. Estimate overdispersion (c-hat) from the globally best model
+    2. Clamp c-hat to [1, inf): values below 1 are not meaningful and
+       collapse to standard AICc
+    3. If c-hat > 1.0, apply QAICc; otherwise use AICc
+    4. If c-hat > 4.0, warn that structural lack of fit may be present
+    5. Calculate delta_i and Akaike weights
+    6. Apply parsimony: if delta_i <= 2, prefer simpler model
 
     Parameters
     ----------
     models : dict
         Dictionary of ModelResult objects
-    c_hat_threshold : float, default 1.0
-        If c_hat > threshold, use QAICc instead of AICc
     parsimony : bool, default True
         Apply parsimony principle for tied models
     delta_i_threshold : float, default 2.0
@@ -375,22 +401,35 @@ def select_best_model(
     -----
     Parsimony principle: When delta_i < 2 between models, prefer the
     simpler model (fewer parameters). This avoids overfitting.
+
+    B&A (2002) recommend ĉ ∈ [1, 4]. Values above 4 suggest structural
+    misfit that cannot be corrected by overdispersion scaling alone.
     """
     if not models:
         raise ValueError("No models to select from")
 
-    # Calculate c-hat from best model (lowest AIC)
+    # Calculate c-hat from globally best model (lowest AICc at c_hat=1)
     temp_aics = {name: calculate_aicc(model, 1.0) for name, model in models.items()}
     best_temp = min(temp_aics, key=temp_aics.get)
     c_hat = calculate_overdispersion(models[best_temp])
 
-    # Calculate AICc/QAICc for all models
-    aiccs = {}
-    for name, model in models.items():
-        if c_hat > c_hat_threshold:
-            aiccs[name] = calculate_aicc(model, c_hat)
-        else:
-            aiccs[name] = calculate_aicc(model, 1.0)
+    # Clamp c-hat per B&A (2002): values below 1 are not meaningful
+    if c_hat < 1.0:
+        c_hat = 1.0
+
+    # Warn if c-hat exceeds B&A's practical upper bound
+    if c_hat > 4.0:
+        warnings.warn(
+            f"c-hat = {c_hat:.2f} > 4.0 for model '{best_temp}'. "
+            "Burnham & Anderson (2002) suggest this indicates structural lack "
+            "of fit. QAICc will still be applied, but results should be "
+            "interpreted with caution.",
+            RuntimeWarning,
+            stacklevel=2
+        )
+
+    # Calculate AICc (c_hat == 1.0) or QAICc (c_hat > 1.0) for all models
+    aiccs = {name: calculate_aicc(model, c_hat) for name, model in models.items()}
 
     # Find minimum AICc
     min_aicc = min(aiccs.values())
@@ -409,19 +448,28 @@ def select_best_model(
         best = min(competitive, key=lambda x: models[x].n_params)
     else:
         # Choose model with lowest AICc
-        best = min(aiccs, key=aiccs.get)
+        best = min(aiccs, key=lambda name: aiccs[name])
 
     best_model = models[best]
+
+    # Gap between best and second-best model (used for confidence-tier assignment).
+    # delta_is[best] is 0 when best is the raw AICc minimum; the second-best
+    # nonzero delta tells us how much better the winner is than its nearest rival.
+    other_deltas = [d for name, d in delta_is.items() if name != best]
+    delta_i_second_best = min(other_deltas) if other_deltas else 0.0
 
     return ModelSelection(
         best_model=best,
         aicc=aiccs[best],
         delta_i=delta_is[best],
+        delta_i_second_best=delta_i_second_best,
         weight=weights[best],
         r_squared=best_model.fitted_model.rsquared if hasattr(best_model.fitted_model, 'rsquared') else 0.0,
         adj_r_squared=best_model.fitted_model.rsquared_adj if hasattr(best_model.fitted_model, 'rsquared_adj') else 0.0,
         competitive_models=competitive,
-        model_coefficients=best_model.fitted_model.params.to_dict()
+        model_coefficients=best_model.fitted_model.params.to_dict(),
+        c_hat=c_hat,
+        using_qaic=c_hat > 1.0,
     )
 
 
@@ -499,79 +547,81 @@ def run_diagnostics(model_result: ModelResult, alpha: float = 0.10) -> Diagnosti
 def assign_confidence_tier(
     model_selection: ModelSelection,
     diagnostics: DiagnosticResult,
-    delta_i_threshold: float = 2.0,
-    weight_threshold: float = 0.7
 ) -> int:
     """
-    Assign confidence tier (1-4) based on evidence strength.
+    Assign confidence tier (1-4) per Burnham & Anderson (2002).
 
-    Tier 1 (Strong Evidence):
-        - DW test passes
-        - Delta_i <= 2
-        - Weight >= 0.7
+    Uses ``model_selection.delta_i_second_best`` — the gap between the best
+    and second-best model — as the Δᵢ criterion.  ``delta_i`` on the
+    ``ModelSelection`` object is the selected model's own offset from the
+    global minimum (0 when it is the raw best), which is not the right
+    quantity for tier assignment.
 
-    Tier 2 (Moderate Evidence):
-        - Some diagnostics pass
-        - Reasonable delta_i
-
-    Tier 3 (Weak Evidence):
-        - Multiple diagnostic failures
-        - Higher delta_i
-
-    Tier 4 (Exploratory):
-        - Severe diagnostic violations
-        - Should not be used for conclusions
+    Decision table
+    --------------
+    Tier  Criteria
+    ----  --------
+    1     Δᵢ ≤ 2  AND  DW pass  AND  ≤ 1 other diagnostic failure
+              (other = Shapiro-Wilk + Breusch-Pagan; DW is counted separately)
+    2     (2 < Δᵢ < 7  AND  DW pass,  any SW/BP pattern)
+          OR
+          (Δᵢ ≤ 2  AND  DW fail  AND  QAICc was used)
+    3     7 ≤ Δᵢ < 10,  any diagnostic pattern
+    4     Δᵢ ≥ 10
 
     Parameters
     ----------
     model_selection : ModelSelection
-        Selected model information
+        Selected model information, including ``delta_i_second_best``,
+        ``c_hat``, and ``using_qaic``.
     diagnostics : DiagnosticResult
-        Diagnostic test results
-    delta_i_threshold : float, default 2.0
-        Threshold for strong evidence
-    weight_threshold : float, default 0.7
-        Threshold for strong model support
+        Diagnostic test results for the selected model.
 
     Returns
     -------
     int
-        Confidence tier (1=strongest, 4=weakest)
+        Confidence tier (1 = strongest evidence, 4 = exploratory only).
     """
-    # Tier 1: Strong evidence
-    if (not diagnostics.dw_fail and
-        model_selection.delta_i <= delta_i_threshold and
-        model_selection.weight >= weight_threshold):
+    delta = model_selection.delta_i_second_best
+    dw_pass = not diagnostics.dw_fail
+    other_failures = int(diagnostics.shapiro_fail) + int(diagnostics.bp_fail)
+
+    # Tier 1: strong separation from competitors, clean residuals
+    if delta <= 2.0 and dw_pass and other_failures <= 1:
         return 1
 
-    # Tier 2: Moderate evidence
-    if (not diagnostics.dw_fail or
-        (model_selection.delta_i <= delta_i_threshold and
-         model_selection.weight >= 0.5)):
+    # Tier 2: moderate separation with acceptable autocorrelation, or
+    #          tight separation that required overdispersion correction
+    if (2.0 < delta < 7.0 and dw_pass) or \
+       (delta <= 2.0 and not dw_pass and model_selection.using_qaic):
         return 2
 
-    # Tier 3: Weak evidence
-    if not diagnostics.any_fail or model_selection.delta_i <= 4.0:
+    # Tier 3: weak separation
+    if 7.0 <= delta < 10.0:
         return 3
 
-    # Tier 4: Exploratory only
+    # Tier 4: Δᵢ ≥ 10 (or any unclassified combination)
     return 4
 
 
 def classify_trajectory(
     model_selection: ModelSelection,
-    model_result: ModelResult
+    model_result: ModelResult,
+    tier: int = 1
 ) -> str:
     """
-    Classify skill trajectory based on selected model.
+    Classify skill trajectory based on selected model per B&A (2002).
 
     Trajectories:
-    - Stable: Null model selected
-    - Linear Growth/Decline: Linear model with positive/negative slope
-    - Exponential Growth/Decline: Exponential model
-    - Decelerating Growth: Log-year model with positive coefficient
+    - Stable: Null model selected, Tier 4 (weak evidence), or implied
+      annual change < 1 percentage point per year for any model
+    - Linear Growth/Decline: Linear model, |slope| >= 0.01 pp/year
+    - Decelerating Growth/Decline: Log-year model, avg annual change >= 0.01
+    - Rapidly Increasing/Decreasing: Exponential model, |β₁| > 0.05
+    - Exponential Growth/Decline: Exponential model, 0.01 <= |β₁| <= 0.05
     - Accelerating: Quadratic with positive second derivative
-    - Non-monotonic: Quadratic with inflection point
+    - Non-monotonic: Quadratic with sign change (inflection point)
+    - Decelerating: Quadratic with negative second derivative, no sign change
 
     Parameters
     ----------
@@ -579,48 +629,71 @@ def classify_trajectory(
         Selected model
     model_result : ModelResult
         Fitted model object
+    tier : int, default 1
+        Confidence tier from assign_confidence_tier(). Tier 4 skills are
+        classified as Stable regardless of the selected model, because the
+        evidence is too weak to support a directional claim (B&A 2002).
 
     Returns
     -------
     str
         Trajectory classification
 
+    Notes
+    -----
+    Annual change rate thresholds follow the paper's classification table:
+    - Linear model: annual change rate = β₁ (prevalence units/year)
+    - Log-year model: avg annual change = β₁ * log(n) / (n - 1), where n is
+      the number of observations (years), giving the mean step over the study
+      period
+    - Exponential model: β₁ approximates the annual relative change rate in
+      log space; |β₁| > 0.05 (~5%/year) is required for "Rapidly" labels
+
     Examples
     --------
-    >>> trajectory = classify_trajectory(selection, model)
+    >>> trajectory = classify_trajectory(selection, model, tier=2)
     >>> print(trajectory)
     'Linear Growth'
     """
     model_name = model_selection.best_model
     fitted = model_result.fitted_model
 
+    # Tier 4: insufficient evidence to support any directional claim
+    if tier == 4:
+        return 'Stable'
+
     if model_name == 'null':
         return 'Stable'
 
     elif model_name == 'linear':
-        slope = fitted.params.get('year_std', 0)
-        if slope > 0:
-            return 'Linear Growth'
-        else:
-            return 'Linear Decline'
+        slope = fitted.params.get('year_centered', 0)
+        # Annual change rate is constant for a linear model
+        if abs(slope) < 0.01:
+            return 'Stable'
+        return 'Linear Growth' if slope > 0 else 'Linear Decline'
 
     elif model_name == 'log_year':
         coef = fitted.params.get('log_year', 0)
-        if coef > 0:
-            return 'Decelerating Growth'
-        else:
-            return 'Decelerating Decline'
+        # Average annual change = total fitted change / (n_years - 1).
+        # log_year goes from log(1)=0 to log(n), so total change = coef * log(n).
+        n = model_result.n_obs
+        avg_annual_change = coef * np.log(n) / (n - 1) if n > 1 else coef
+        if abs(avg_annual_change) < 0.01:
+            return 'Stable'
+        return 'Decelerating Growth' if coef > 0 else 'Decelerating Decline'
 
     elif model_name == 'exponential':
-        slope = fitted.params.get('year_std', 0)
-        if slope > 0:
-            return 'Exponential Growth'
-        else:
-            return 'Exponential Decline'
+        slope = fitted.params.get('year_centered', 0)
+        # slope is in log-prevalence space; approximates annual relative change
+        if abs(slope) < 0.01:
+            return 'Stable'
+        if abs(slope) > 0.05:
+            return 'Rapidly Increasing' if slope > 0 else 'Rapidly Decreasing'
+        return 'Exponential Growth' if slope > 0 else 'Exponential Decline'
 
     elif model_name == 'quadratic':
-        linear_coef = fitted.params.get('year_std', 0)
-        quad_coef = fitted.params.get('year_std_sq', 0)
+        linear_coef = fitted.params.get('year_centered', 0)
+        quad_coef = fitted.params.get('year_centered_sq', 0)
 
         if quad_coef > 0:
             return 'Accelerating'
@@ -664,6 +737,9 @@ if __name__ == "__main__":
     print(f"   Best model: {selection.best_model}")
     print(f"   AICc: {selection.aicc:.2f}")
     print(f"   Weight: {selection.weight:.3f}")
+    print(f"   Delta_i (2nd best): {selection.delta_i_second_best:.2f}")
+    print(f"   c_hat: {selection.c_hat:.3f}")
+    print(f"   Using QAICc: {selection.using_qaic}")
 
     print("\n3. Running diagnostics...")
     diagnostics = run_diagnostics(models[selection.best_model])
@@ -676,7 +752,7 @@ if __name__ == "__main__":
     print(f"   Confidence tier: {tier}")
 
     print("\n5. Classifying trajectory...")
-    trajectory = classify_trajectory(selection, models[selection.best_model])
+    trajectory = classify_trajectory(selection, models[selection.best_model], tier=tier)
     print(f"   Trajectory: {trajectory}")
 
     print("\n" + "=" * 60)
