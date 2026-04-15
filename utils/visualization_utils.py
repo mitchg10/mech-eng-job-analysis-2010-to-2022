@@ -47,9 +47,9 @@ def _generate_smooth_curve(
         Model type ('null', 'linear', 'log_year', 'exponential', 'quadratic')
     model_coefficients : dict
         Coefficient dict from summary_df['Model_Coefficients']
-        Keys depend on model type (e.g., 'Intercept', 'year_std', 'log_year')
+        Keys depend on model type (e.g., 'Intercept', 'year_centered', 'log_year')
     prevalence_df : pl.DataFrame
-        Prevalence data (needed for standardization parameters)
+        Prevalence data (needed for centering parameters)
     skill : str
         Skill name
     n_points : int, default 100
@@ -64,16 +64,16 @@ def _generate_smooth_curve(
 
     Notes
     -----
-    The standardization parameters (year_mean, year_std, min_year) are computed
-    from the prevalence_df to match the standardization used during model fitting
-    in statistics_utils.py.
+    The centering parameter (year_mean, min_year) are computed from the
+    prevalence_df to match the centering used during model fitting in
+    statistics_utils.py (B&A 2002: center only, do not scale).
 
     Model equations:
     - null: y = intercept
-    - linear: y = intercept + coef_year * year_std + coef_text * text_std
+    - linear: y = intercept + coef_year * year_centered + coef_text * text_std
     - log_year: y = intercept + coef_log * log(year - min_year + 1) + coef_text * text_std
-    - exponential: y = exp(intercept + coef_year * year_std + coef_text * text_std)
-    - quadratic: y = intercept + coef_year * year_std + coef_sq * year_std² + coef_text * text_std
+    - exponential: y = exp(intercept + coef_year * year_centered + coef_text * text_std)
+    - quadratic: y = intercept + coef_year * year_centered + coef_sq * year_centered² + coef_text * text_std
     """
     # Filter to skill data
     skill_prev = prevalence_df.filter(pl.col('Skill') == skill)
@@ -83,9 +83,8 @@ def _generate_smooth_curve(
 
     years_orig = skill_prev['Year'].to_numpy()
 
-    # Compute standardization parameters (matching statistics_utils.py lines 178-183)
+    # Compute centering parameter (matching statistics_utils.py: center only, do not scale)
     year_mean = years_orig.mean()
-    year_std_val = years_orig.std()
     min_year = years_orig.min()
     max_year = years_orig.max()
     job_text_mean = skill_prev['job_text_length_std'].mean()
@@ -104,9 +103,9 @@ def _generate_smooth_curve(
         y_dense = intercept * np.ones_like(years_dense)
 
     elif model_name == 'linear':
-        # Linear model: prevalence ~ year_std + job_text_length_std
-        year_std_dense = (years_dense - year_mean) / year_std_val
-        y_dense = intercept + coef['year_std'] * year_std_dense + job_text_coef * job_text_mean
+        # Linear model: prevalence ~ year_centered + job_text_length_std
+        year_centered_dense = years_dense - year_mean
+        y_dense = intercept + coef['year_centered'] * year_centered_dense + job_text_coef * job_text_mean
 
     elif model_name == 'log_year':
         # Log-year model: prevalence ~ log(year - min_year + 1) + job_text_length_std
@@ -114,19 +113,19 @@ def _generate_smooth_curve(
         y_dense = intercept + coef['log_year'] * log_year_dense + job_text_coef * job_text_mean
 
     elif model_name == 'exponential':
-        # Exponential model: log(prevalence) ~ year_std + job_text_length_std
+        # Exponential model: log(prevalence) ~ year_centered + job_text_length_std
         # Need to back-transform from log space
-        year_std_dense = (years_dense - year_mean) / year_std_val
-        log_y = intercept + coef['year_std'] * year_std_dense + job_text_coef * job_text_mean
+        year_centered_dense = years_dense - year_mean
+        log_y = intercept + coef['year_centered'] * year_centered_dense + job_text_coef * job_text_mean
         y_dense = np.exp(log_y)
 
     elif model_name == 'quadratic':
-        # Quadratic model: prevalence ~ year_std + year_std² + job_text_length_std
-        year_std_dense = (years_dense - year_mean) / year_std_val
-        year_std_sq_dense = year_std_dense ** 2
+        # Quadratic model: prevalence ~ year_centered + year_centered_sq + job_text_length_std
+        year_centered_dense = years_dense - year_mean
+        year_centered_sq_dense = year_centered_dense ** 2
         y_dense = (intercept +
-                   coef['year_std'] * year_std_dense +
-                   coef['year_std_sq'] * year_std_sq_dense +
+                   coef['year_centered'] * year_centered_dense +
+                   coef['year_centered_sq'] * year_centered_sq_dense +
                    job_text_coef * job_text_mean)
 
     else:
@@ -138,7 +137,7 @@ def _generate_smooth_curve(
 def plot_trajectory_grid(
     summary_df: pl.DataFrame,
     prevalence_df: pl.DataFrame,
-    tier: int,
+    discriminability: str,
     output_path: str,
     max_cols: int = 5,
     figsize_per_subplot: tuple = (4, 3),
@@ -152,12 +151,13 @@ def plot_trajectory_grid(
     Parameters
     ----------
     summary_df : pl.DataFrame
-        Summary with columns: Skill, Selected_Model, Confidence_Tier,
-        R_squared, AICc, Weight, Fitted_Values, Model_Coefficients, etc.
+        Summary with columns: Skill, Selected_Model, Discriminability,
+        Assumption_Quality, R_squared, AICc, Weight, Fitted_Values,
+        Model_Coefficients, etc.
     prevalence_df : pl.DataFrame
         Prevalence data with columns: Skill, Year, prevalence, job_text_length_std
-    tier : int
-        Confidence tier to plot (1, 2, or 3)
+    discriminability : str
+        Discriminability level to plot ('Strong', 'Moderate', or 'Weak')
     output_path : str
         Path to save figure
     max_cols : int, default 5
@@ -179,17 +179,17 @@ def plot_trajectory_grid(
     years using the model coefficients stored in summary_df. This produces mathematically
     accurate smooth curves rather than connecting 13 discrete predictions.
 
-    The smooth curve uses the same standardization as the original model fitting:
-    - year_std = (Year - Year.mean()) / Year.std()
+    The smooth curve uses the same centering as the original model fitting:
+    - year_centered = Year - Year.mean()
     - log_year = log(Year - min_year + 1)
     - Coefficients are retrieved from summary_df['Model_Coefficients']
     """
-    # Filter to tier
-    tier_skills = summary_df.filter(pl.col('Confidence_Tier') == tier)
+    # Filter to discriminability level
+    tier_skills = summary_df.filter(pl.col('Discriminability') == discriminability)
     skills = tier_skills['Skill'].to_list()
 
     if not skills:
-        print(f"No skills in tier {tier}")
+        print(f"No skills with {discriminability} discriminability")
         return
 
     # Calculate grid dimensions
@@ -233,8 +233,9 @@ def plot_trajectory_grid(
         skill_summary = tier_skills.filter(pl.col('Skill') == skill).row(0, named=True)
         model_name = skill_summary['Selected_Model']
         r_squared = skill_summary.get('R_squared', 0)
-        aicc = skill_summary.get('AICc', 0)
         weight = skill_summary.get('Weight', 0)
+        disc = skill_summary.get('Discriminability', 'N/A')
+        aq = skill_summary.get('Assumption_Quality', 'N/A')
 
         # Overlay model fit if requested
         if show_model_fit:
@@ -264,7 +265,7 @@ def plot_trajectory_grid(
                             linewidth=2.5, label=f'{model_display}', zorder=3)
         # Add statistics annotation
         if show_statistics:
-            stats_text = f"R²={r_squared:.3f}\nAICc={aicc:.1f}"
+            stats_text = f"R²={r_squared:.3f}\nDisc: {disc}\nAQ: {aq}"
             ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
                     fontsize=6, verticalalignment='top',
                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -282,15 +283,13 @@ def plot_trajectory_grid(
     for idx in range(n_skills, len(axes)):
         axes[idx].set_visible(False)
 
-    tier_names = {1: 'Strong Evidence', 2: 'Moderate Evidence', 3: 'Weak Evidence'}
-    tier_label = tier_names.get(tier, f'Tier {tier}')
-    plt.suptitle(f'{tier_label} Skill Trajectories (Tier {tier})',
+    plt.suptitle(f'{discriminability} Discriminability Skill Trajectories',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"Saved tier {tier} trajectories to {output_path}")
+    print(f"Saved {discriminability} discriminability trajectories to {output_path}")
 
 
 def plot_single_skill_trajectory(
@@ -349,13 +348,16 @@ def plot_single_skill_trajectory(
         skill_row = summary_df.filter(pl.col('Skill') == skill)
         if len(skill_row) > 0:
             skill_stats = skill_row.row(0, named=True)
-            tier = skill_stats.get('Confidence_Tier', 'N/A')
+            discriminability = skill_stats.get('Discriminability', 'N/A')
+            assumption_quality = skill_stats.get('Assumption_Quality', 'N/A')
             trajectory = skill_stats.get('Trajectory_Class', 'N/A')
         else:
-            tier = 'N/A'
+            discriminability = 'N/A'
+            assumption_quality = 'N/A'
             trajectory = 'N/A'
     else:
-        tier = 'N/A'
+        discriminability = 'N/A'
+        assumption_quality = 'N/A'
         trajectory = 'N/A'
 
     # Create figure
@@ -402,9 +404,9 @@ def plot_single_skill_trajectory(
                         fitted_model = model_result.fitted_model
                         model_coefs = {
                             'Intercept': fitted_model.params.get('Intercept', 0.0),
-                            'year_std': fitted_model.params.get('year_std', 0.0),
+                            'year_centered': fitted_model.params.get('year_centered', 0.0),
                             'log_year': fitted_model.params.get('log_year', 0.0),
-                            'year_std_sq': fitted_model.params.get('year_std_sq', 0.0),
+                            'year_centered_sq': fitted_model.params.get('year_centered_sq', 0.0),
                             'job_text_length_std': fitted_model.params.get('job_text_length_std', 0.0)
                         }
 
@@ -495,7 +497,8 @@ def plot_single_skill_trajectory(
         f"Δᵢ = {selection.delta_i:.2f}",
         "",
         f"Trajectory: {trajectory}",
-        f"Confidence Tier: {tier}"
+        f"Discriminability: {discriminability}",
+        f"Assumption Quality: {assumption_quality}",
     ]
 
     # Add competitive models if any
@@ -542,7 +545,8 @@ def plot_single_skill_trajectory(
         'delta_i': selection.delta_i,
         'competitive_models': selection.competitive_models,
         'trajectory': trajectory,
-        'tier': tier
+        'discriminability': discriminability,
+        'assumption_quality': assumption_quality,
     }
 
 

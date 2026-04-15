@@ -544,77 +544,92 @@ def run_diagnostics(model_result: ModelResult, alpha: float = 0.10) -> Diagnosti
     )
 
 
-def assign_confidence_tier(
-    model_selection: ModelSelection,
-    diagnostics: DiagnosticResult,
-) -> int:
+def assign_discriminability(model_selection: ModelSelection) -> str:
     """
-    Assign confidence tier (1-4) per Burnham & Anderson (2002).
+    Classify model discriminability based on Δᵢ to the second-best model.
 
-    Uses ``model_selection.delta_i_second_best`` — the gap between the best
-    and second-best model — as the Δᵢ criterion.  ``delta_i`` on the
-    ``ModelSelection`` object is the selected model's own offset from the
-    global minimum (0 when it is the raw best), which is not the right
-    quantity for tier assignment.
+    Uses ``model_selection.delta_i_second_best`` — the AICc gap between the
+    selected model and its nearest competitor — as the sole criterion.  This
+    is pure B&A (2002) and answers the question: *how clearly can we pick a
+    winner?*
 
     Decision table
     --------------
-    Tier  Criteria
-    ----  --------
-    1     Δᵢ ≤ 2  AND  DW pass  AND  ≤ 1 other diagnostic failure
-              (other = Shapiro-Wilk + Breusch-Pagan; DW is counted separately)
-    2     (2 < Δᵢ < 7  AND  DW pass,  any SW/BP pattern)
-          OR
-          (Δᵢ ≤ 2  AND  DW fail  AND  QAICc was used)
-    3     7 ≤ Δᵢ < 10,  any diagnostic pattern
-    4     Δᵢ ≥ 10
+    Label               Δᵢ (second-best)
+    ------------------- ----------------
+    Strong              ≤ 2
+    Moderate            2 < Δᵢ < 7
+    Weak                7 ≤ Δᵢ < 10
+    Indistinguishable   ≥ 10
 
     Parameters
     ----------
     model_selection : ModelSelection
-        Selected model information, including ``delta_i_second_best``,
-        ``c_hat``, and ``using_qaic``.
+        Selected model information, including ``delta_i_second_best``.
+
+    Returns
+    -------
+    str
+        One of 'Strong', 'Moderate', 'Weak', or 'Indistinguishable'.
+    """
+    delta = model_selection.delta_i_second_best
+    if delta <= 2.0:
+        return 'Strong'
+    if delta < 7.0:
+        return 'Moderate'
+    if delta < 10.0:
+        return 'Weak'
+    return 'Indistinguishable'
+
+
+def assign_assumption_quality(
+    model_selection: ModelSelection,
+    diagnostics: DiagnosticResult,
+) -> str:
+    """
+    Classify the quality of model assumptions for the selected model.
+
+    Answers the question: *how much do we trust the AICc values?*  Three
+    mutually exclusive labels are assigned in precedence order.
+
+    Decision table
+    --------------
+    Label        Condition
+    ------------ ----------------------------------------------------------
+    Compromised  DW failure  OR  ≥ 2 failures among Shapiro-Wilk + BP
+    Corrected    Overdispersion detected and QAICc applied (no other fails)
+    Clean        All diagnostics pass, no overdispersion
+
+    Parameters
+    ----------
+    model_selection : ModelSelection
+        Selected model information, including ``using_qaic``.
     diagnostics : DiagnosticResult
         Diagnostic test results for the selected model.
 
     Returns
     -------
-    int
-        Confidence tier (1 = strongest evidence, 4 = exploratory only).
+    str
+        One of 'Compromised', 'Corrected', or 'Clean'.
     """
-    delta = model_selection.delta_i_second_best
-    dw_pass = not diagnostics.dw_fail
     other_failures = int(diagnostics.shapiro_fail) + int(diagnostics.bp_fail)
-
-    # Tier 1: strong separation from competitors, clean residuals
-    if delta <= 2.0 and dw_pass and other_failures <= 1:
-        return 1
-
-    # Tier 2: moderate separation with acceptable autocorrelation, or
-    #          tight separation that required overdispersion correction
-    if (2.0 < delta < 7.0 and dw_pass) or \
-       (delta <= 2.0 and not dw_pass and model_selection.using_qaic):
-        return 2
-
-    # Tier 3: weak separation
-    if 7.0 <= delta < 10.0:
-        return 3
-
-    # Tier 4: Δᵢ ≥ 10 (or any unclassified combination)
-    return 4
+    if diagnostics.dw_fail or other_failures >= 2:
+        return 'Compromised'
+    if model_selection.using_qaic:
+        return 'Corrected'
+    return 'Clean'
 
 
 def classify_trajectory(
     model_selection: ModelSelection,
     model_result: ModelResult,
-    tier: int = 1
 ) -> str:
     """
     Classify skill trajectory based on selected model per B&A (2002).
 
     Trajectories:
-    - Stable: Null model selected, Tier 4 (weak evidence), or implied
-      annual change < 1 percentage point per year for any model
+    - Stable: Null model selected, or implied annual change < 1 percentage
+      point per year for any model
     - Linear Growth/Decline: Linear model, |slope| >= 0.01 pp/year
     - Decelerating Growth/Decline: Log-year model, avg annual change >= 0.01
     - Rapidly Increasing/Decreasing: Exponential model, |β₁| > 0.05
@@ -623,16 +638,16 @@ def classify_trajectory(
     - Non-monotonic: Quadratic with sign change (inflection point)
     - Decelerating: Quadratic with negative second derivative, no sign change
 
+    Skills with 'Indistinguishable' discriminability should not be passed
+    to this function — their trajectory is not reported (set to None by the
+    caller).
+
     Parameters
     ----------
     model_selection : ModelSelection
         Selected model
     model_result : ModelResult
         Fitted model object
-    tier : int, default 1
-        Confidence tier from assign_confidence_tier(). Tier 4 skills are
-        classified as Stable regardless of the selected model, because the
-        evidence is too weak to support a directional claim (B&A 2002).
 
     Returns
     -------
@@ -651,16 +666,12 @@ def classify_trajectory(
 
     Examples
     --------
-    >>> trajectory = classify_trajectory(selection, model, tier=2)
+    >>> trajectory = classify_trajectory(selection, model)
     >>> print(trajectory)
     'Linear Growth'
     """
     model_name = model_selection.best_model
     fitted = model_result.fitted_model
-
-    # Tier 4: insufficient evidence to support any directional claim
-    if tier == 4:
-        return 'Stable'
 
     if model_name == 'null':
         return 'Stable'
@@ -747,13 +758,19 @@ if __name__ == "__main__":
     print(f"   DW statistic: {diagnostics.dw_stat:.2f}")
     print(f"   Any failures: {diagnostics.any_fail}")
 
-    print("\n4. Assigning confidence tier...")
-    tier = assign_confidence_tier(selection, diagnostics)
-    print(f"   Confidence tier: {tier}")
+    print("\n4. Assigning evidence quality dimensions...")
+    discriminability = assign_discriminability(selection)
+    assumption_quality = assign_assumption_quality(selection, diagnostics)
+    print(f"   Discriminability: {discriminability}")
+    print(f"   Assumption quality: {assumption_quality}")
 
     print("\n5. Classifying trajectory...")
-    trajectory = classify_trajectory(selection, models[selection.best_model], tier=tier)
-    print(f"   Trajectory: {trajectory}")
+    if discriminability == 'Indistinguishable':
+        trajectory = None
+        print("   Trajectory: None (not reported — indistinguishable models)")
+    else:
+        trajectory = classify_trajectory(selection, models[selection.best_model])
+        print(f"   Trajectory: {trajectory}")
 
     print("\n" + "=" * 60)
     print("Module tests complete!")

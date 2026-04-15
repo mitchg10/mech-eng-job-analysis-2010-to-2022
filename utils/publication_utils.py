@@ -316,7 +316,7 @@ def export_all_ieee_tables(
     table5 = generate_ieee_table(df, {
         'filters': [pl.col('Selected_Model') == 'linear'],
         'sort_by': 'Slope',
-        'columns': ['Skill', 'Slope', 'R_squared', 'Confidence_Tier', 'Trajectory_Class'],
+        'columns': ['Skill', 'Slope', 'R_squared', 'Discriminability', 'Assumption_Quality', 'Trajectory_Class'],
         'limit': 20,
         'ascending': False
     })
@@ -327,7 +327,7 @@ def export_all_ieee_tables(
     table6 = generate_ieee_table(df, {
         'filters': [pl.col('Selected_Model') == 'log_year'],
         'sort_by': 'R_squared',
-        'columns': ['Skill', 'Growth_Rate', 'R_squared', 'Confidence_Tier'],
+        'columns': ['Skill', 'Growth_Rate', 'R_squared', 'Discriminability', 'Assumption_Quality'],
         'limit': 20,
         'ascending': False
     })
