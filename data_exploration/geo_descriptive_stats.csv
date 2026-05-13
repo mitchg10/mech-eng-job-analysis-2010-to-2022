@@ -1,0 +1,9 @@
+field,field_type,n_present,n_unique,top_value,top_count,top_pct,val_min,val_max,val_mean,val_median,val_std
+CanonCity,categorical,1148742,8835,Houston,32324,2.814,,,,,
+CanonCountry,categorical,1166267,2,USA,1166243,99.998,,,,,
+CanonState,categorical,1165539,56,CA,173338,14.872,,,,,
+DivisionCode,categorical,357025,41,47664,39593,11.09,,,,,
+CanonCounty,categorical,1148572,1703,Los Angeles,37667,3.279,,,,,
+CanonPostalCode,categorical,1145436,17676,77001,17137,1.496,,,,,
+Latitude,numeric,1149410,,,,,7.327,71.3003,38.169661697479576,39.1072,5.165878574181578
+Longitude,numeric,1149410,,,,,-166.538,166.642,-93.35918705448881,-87.9445,16.893401787615037
